@@ -8,4 +8,14 @@
 
   <PropertyGroup Condition=" '$(RunConfiguration)' == 'https' " />
   <PropertyGroup Condition=" '$(RunConfiguration)' == 'http' " />
+  <ItemGroup>
+    <Content Remove="wwwroot\" />
+    <Content Remove="wwwroot\msx\" />
+    <Content Remove="wwwroot\Video\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="wwwroot\" />
+    <Folder Include="wwwroot\msx\" />
+    <Folder Include="wwwroot\Video\" />
+  </ItemGroup>
 </Project>
