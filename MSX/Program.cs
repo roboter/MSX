@@ -146,10 +146,16 @@ app.MapGet("/msx/menu.json", (HttpContext context) =>
 {
     var scheme = context.Request.Scheme;
     var host = context.Request.Host.Value;
-    var allowedExtensions = new HashSet<string>(mediaConfig.AllowedExtensions, StringComparer.OrdinalIgnoreCase);
-
+  
     var videoItems = new List<MsxMediaItem>();
 
+    // 1. Create a case-insensitive hash set from the configured extensions
+    var allowedExtensions = new HashSet<string>(
+        mediaConfig.AllowedExtensions ?? [".mp4", ".mkv", ".avi", ".mov", ".webm"],
+        StringComparer.OrdinalIgnoreCase
+    );
+
+    // 2. Filter files ignoring case
     if (Directory.Exists(downloadsFolder))
     {
         var files = Directory.EnumerateFiles(downloadsFolder, "*.*", SearchOption.TopDirectoryOnly)
