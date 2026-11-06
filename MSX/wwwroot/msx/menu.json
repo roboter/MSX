@@ -15,7 +15,7 @@
         "items": [
           {
             "title": "Test",
-            "action": "video:http://192.168.0.37:5208/Video/fire.mp4"
+            "action": "video:http://{SERVER}/Video/fire.mp4"
           }          
         ]
       }
