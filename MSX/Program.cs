@@ -75,6 +75,21 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.MapGet("/", () => "Hello World!");
 
+app.MapGet("/cover",  async (HttpContext context) =>
+{
+    var topicUrl = "https://nnmclub.to/forum/viewtopic.php?t=1898399";
+    var coverUrl = await NnmClubCoverScraper.GetCoverUrlAsync(topicUrl);
+
+    if (!string.IsNullOrEmpty(coverUrl))
+    {
+        Console.WriteLine($"Discovered Cover URL: {coverUrl}");
+    }
+    else
+    {
+        Console.WriteLine("Cover not found.");
+    }
+});
+
 // 1. Serve start.json with dynamic {SERVER} replacement
 app.MapGet("/msx/start.json", async (HttpContext context) =>
 {

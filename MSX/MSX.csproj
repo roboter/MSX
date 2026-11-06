@@ -19,4 +19,8 @@
     <Folder Include="wwwroot\msx\" />
     <Folder Include="wwwroot\Video\" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="HtmlAgilityPack" Version="1.13.1" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="11.0.0-rc.3.26522.148" />
+  </ItemGroup>
 </Project>
