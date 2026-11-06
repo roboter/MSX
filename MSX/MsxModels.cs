@@ -14,7 +14,7 @@ public sealed class MsxRoot
 public sealed class MsxMenuItem
 {
     [JsonPropertyName("icon")]
-    public string Icon { get; set; } = string.Empty;
+    public string Icon { get; set; } = "movie";
 
     [JsonPropertyName("label")]
     public string Label { get; set; } = string.Empty;
@@ -48,6 +48,9 @@ public sealed class MsxTemplate
 
     [JsonPropertyName("color")]
     public string Color { get; set; } = "msx-glass";
+
+    [JsonPropertyName("imageFiller")]
+    public string ImageFiller { get; set; } = "cover";
 }
 
 public sealed class MsxMediaItem
@@ -57,11 +60,8 @@ public sealed class MsxMediaItem
 
     [JsonPropertyName("action")]
     public string Action { get; set; } = string.Empty;
-}
 
-public sealed class MediaSettings
-{
-    public const string SectionName = "MediaSettings";
-    public string DownloadPath { get; set; } = "/home/roboter/Downloads";
-    public string[] AllowedExtensions { get; set; } = [".mp4", ".mkv", ".avi", ".mov", ".webm"];
+    [JsonPropertyName("image")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Image { get; set; }
 }

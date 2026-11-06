@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.FileProviders;
+using MSX;
 using MSX.Models;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -74,65 +75,6 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.MapGet("/", () => "Hello World!");
 
-app.MapGet("/menu.json", (HttpContext context) =>
-{
-    var scheme = context.Request.Scheme;
-    var host = context.Request.Host.Value;
-    var allowedExtensions = new HashSet<string>(mediaConfig.AllowedExtensions, StringComparer.OrdinalIgnoreCase);
-
-    var videoItems = new List<MsxMediaItem>();
-
-    if (Directory.Exists(downloadsFolder))
-    {
-        var files = Directory.EnumerateFiles(downloadsFolder, "*.*", SearchOption.TopDirectoryOnly)
-            .Where(f => allowedExtensions.Contains(Path.GetExtension(f)))
-            .OrderByDescending(File.GetLastWriteTimeUtc);
-
-        foreach (var file in files)
-        {
-            var fileName = Path.GetFileName(file);
-            var safeUrlEncoded = Uri.EscapeDataString(fileName);
-
-            videoItems.Add(new MsxMediaItem
-            {
-                Title = Path.GetFileNameWithoutExtension(fileName),
-                Action = $"video:{scheme}://{host}/media/{safeUrlEncoded}"
-            });
-        }
-    }
-
-    var msxCatalog = new MsxRoot
-    {
-        Headline = "Raspberry Pi 5 Media",
-        Menu =
-        [
-            new()
-            {
-                Icon = "movie",
-                Label = "Downloads",
-                Data = new MsxMenuData
-                {
-                    Type = "pages",
-                    Template = new MsxTemplate
-                    {
-                        Type = "separate",
-                        Layout = "0,0,2,4",
-                        Icon = "msx-white-soft:movie",
-                        Color = "msx-glass"
-                    },
-                    Items = videoItems
-                }
-            }
-        ]
-    };
-
-    return Results.Json(msxCatalog, new JsonSerializerOptions
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        WriteIndented = true
-    });
-});
-
 // 1. Serve start.json with dynamic {SERVER} replacement
 app.MapGet("/msx/start.json", async (HttpContext context) =>
 {
@@ -176,38 +118,83 @@ app.MapGet("/msx/menu.json", (HttpContext context) =>
 {
     var scheme = context.Request.Scheme;
     var host = context.Request.Host.Value;
-  
-    var videoItems = new List<MsxMediaItem>();
 
-    // 1. Create a case-insensitive hash set from the configured extensions
+    // Filter out .avi if present and match case-insensitively
+    var configuredAllowed = mediaConfig.AllowedExtensions?
+        .Where(ext => !ext.Equals(".avi", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+
     var allowedExtensions = new HashSet<string>(
-        mediaConfig.AllowedExtensions ?? [".mp4", ".mkv", ".avi", ".mov", ".webm"],
+        (configuredAllowed != null && configuredAllowed.Length > 0)
+            ? configuredAllowed
+            : [".mp4", ".mkv", ".mov", ".webm"],
         StringComparer.OrdinalIgnoreCase
     );
 
-    // 2. Filter files ignoring case
+    // Validate CoverExtensions with fallback
+    var coverExtensions = (mediaConfig.CoverExtensions != null && mediaConfig.CoverExtensions.Length > 0)
+        ? mediaConfig.CoverExtensions
+        : [".jpg", ".jpeg", ".png", ".webp"];
+
+    // Helper: Build safe, slash-preserving media URLs
+    string BuildMediaUrl(string fullFilePath)
+    {
+        var relative = Path.GetRelativePath(downloadsFolder, fullFilePath).Replace('\\', '/');
+        var safeUrlPath = string.Join("/", relative.Split('/').Select(Uri.EscapeDataString));
+        return $"{scheme}://{host}/media/{safeUrlPath}";
+    }
+
+    // Helper: Discover matching file-level cover art (VideoName.ext -> VideoName.jpg)
+    string? FindCoverUrl(string videoFilePath)
+    {
+        var directory = Path.GetDirectoryName(videoFilePath);
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+            return null;
+
+        var videoBaseName = Path.GetFileNameWithoutExtension(videoFilePath);
+
+        foreach (var ext in coverExtensions)
+        {
+            var candidate = Path.Combine(directory, videoBaseName + ext);
+            if (File.Exists(candidate))
+            {
+                return BuildMediaUrl(candidate);
+            }
+        }
+
+        return null;
+    }
+
+    var videoItems = new List<MsxMediaItem>();
+
     if (Directory.Exists(downloadsFolder))
     {
-        var files = Directory.EnumerateFiles(downloadsFolder, "*.*", SearchOption.TopDirectoryOnly)
+        var files = Directory.EnumerateFiles(downloadsFolder, "*.*", SearchOption.AllDirectories)
             .Where(f => allowedExtensions.Contains(Path.GetExtension(f)))
             .OrderByDescending(File.GetLastWriteTimeUtc);
 
         foreach (var file in files)
         {
-            var fileName = Path.GetFileName(file);
-            var safeUrlEncoded = Uri.EscapeDataString(fileName);
+            var directoryPath = Path.GetDirectoryName(file);
+            var parentFolder = string.IsNullOrEmpty(directoryPath) ? null : Path.GetFileName(directoryPath);
+            var fileNameWithoutExt = Path.GetFileNameWithoutExtension(file);
+
+            var title = string.IsNullOrEmpty(parentFolder) || parentFolder.Equals(Path.GetFileName(downloadsFolder), StringComparison.OrdinalIgnoreCase)
+                ? fileNameWithoutExt
+                : $"{parentFolder} - {fileNameWithoutExt}";
 
             videoItems.Add(new MsxMediaItem
             {
-                Title = Path.GetFileNameWithoutExtension(fileName),
-                Action = $"video:{scheme}://{host}/media/{safeUrlEncoded}"
+                Title = title,
+                Action = $"video:{BuildMediaUrl(file)}",
+                Image = FindCoverUrl(file)
             });
         }
     }
 
     var msxCatalog = new MsxRoot
     {
-        Headline = "My Example Content",
+        Headline = "TorrentBot Media Library",
         Menu = new List<MsxMenuItem>
         {
             new()
@@ -222,7 +209,8 @@ app.MapGet("/msx/menu.json", (HttpContext context) =>
                         Type = "separate",
                         Layout = "0,0,2,4",
                         Icon = "msx-white-soft:movie",
-                        Color = "msx-glass"
+                        Color = "msx-glass",
+                        ImageFiller = "cover"
                     },
                     Items = videoItems
                 }
@@ -236,6 +224,5 @@ app.MapGet("/msx/menu.json", (HttpContext context) =>
         WriteIndented = true
     });
 });
-
 
 await app.RunAsync();
