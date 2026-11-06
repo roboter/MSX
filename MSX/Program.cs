@@ -16,12 +16,42 @@ var mediaConfig = builder.Configuration
     .GetSection(MediaSettings.SectionName)
     .Get<MediaSettings>() ?? new MediaSettings();
 
-// Fallback to home Downloads directory if config path doesn't exist
-var downloadsFolder = Directory.Exists(mediaConfig.DownloadPath)
-    ? mediaConfig.DownloadPath
-    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+string configuredPath = mediaConfig.DownloadPath;
+string downloadsFolder;
 
-Directory.CreateDirectory(downloadsFolder);
+// Log the exact configured path
+Console.WriteLine($"[Config] MediaSettings:DownloadPath = \"{configuredPath}\"");
+
+if (!string.IsNullOrWhiteSpace(configuredPath) && Directory.Exists(configuredPath))
+{
+    downloadsFolder = Path.GetFullPath(configuredPath);
+    Console.ForegroundColor = ConsoleColor.Green;
+    Console.WriteLine($"[Storage] Media directory verified: \"{downloadsFolder}\"");
+    Console.ResetColor();
+}
+else
+{
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine($"[Warning] Media directory NOT found: \"{configuredPath}\"");
+    Console.ResetColor();
+
+    // Fallback to ~/Downloads/TorrentNOTComplete or ~/Downloads
+    downloadsFolder = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        "Downloads",
+        "TorrentNOTComplete"
+    );
+
+    if (!Directory.Exists(downloadsFolder))
+    {
+        Console.WriteLine($"[Storage] Fallback path missing. Creating: \"{downloadsFolder}\"");
+        Directory.CreateDirectory(downloadsFolder);
+    }
+    else
+    {
+        Console.WriteLine($"[Storage] Using fallback directory: \"{downloadsFolder}\"");
+    }
+}
 // Intercept pipeline response and log 404 Not Found to console
 app.Use(async (context, next) =>
 {
