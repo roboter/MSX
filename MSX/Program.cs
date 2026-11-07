@@ -19,6 +19,7 @@ builder.Services.Configure<MediaSettings>(
 
 builder.Services.AddSingleton<TorrServerService>();
 builder.Services.AddSingleton<WebmarksService>();
+builder.Services.AddSingleton<CoverExtractorService>();
 
 var app = builder.Build();
 
@@ -28,6 +29,7 @@ var mediaConfig = builder.Configuration
 
 var torrService = app.Services.GetRequiredService<TorrServerService>();
 var webmarksService = app.Services.GetRequiredService<WebmarksService>();
+var coverExtractorService = app.Services.GetRequiredService<CoverExtractorService>();
 
 var startTime = DateTime.UtcNow;
 const string appVersion = "2.0.0";

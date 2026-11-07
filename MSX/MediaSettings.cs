@@ -13,6 +13,11 @@ public sealed class MediaSettings
     public string TorrServer { get; set; } = string.Empty;
 
     /// <summary>
+    /// Optional The Movie Database (TMDB) API Key for automatic poster discovery
+    /// </summary>
+    public string TmdbApiKey { get; set; } = string.Empty;
+
+    /// <summary>
     /// Supported video file extensions
     /// </summary>
     public string[] AllowedExtensions { get; set; } =
