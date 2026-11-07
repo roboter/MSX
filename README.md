@@ -25,11 +25,28 @@ With this server, you can host your own private TV portal, serve local media ass
 
 ## ✨ Features
 
-- ⚡ **Lightweight & Fast**: Powered by .NET 8 Web API minimal pipeline for high efficiency.
-- 📺 **MediaStation X Native**: Ready-to-use endpoints for `start.json` portal descriptors & `menu.json` navigation trees.
-- 🎬 **Video & Audio Streaming**: Serve local video assets (`/Video/`) alongside remote audio and image streams.
-- 🎨 **Glassmorphism UI Preset**: Pre-configured menu templates utilizing `msx-glass` UI elements and soft icons.
-- 🌐 **Dynamic IP Binding**: Auto-resolves server addresses using MSX `{SERVER}` placeholders for seamless network deployment.
+- ⚡ **Lightweight & Fast**: Powered by ASP.NET Core minimal Web API pipeline for maximum performance.
+- 📺 **MediaStation X Native**: Ready-to-use endpoints for `start.json` descriptors & dynamic `menu.json` catalogs.
+- 🧲 **TorrServer Integration**:
+  - Direct integration with [TorrServer](https://github.com/YouROK/TorrServer).
+  - Stream torrents online with peer counts, status badges, and internal file selection.
+  - Automatic detection and playback of local `.torrent` files inside your media folders.
+- 📁 **Folder Hierarchy Preservation**:
+  - Folders remain navigable directories with automatic cover/poster discovery.
+  - Alphanumeric / natural numeric sorting for files and episodes (e.g. `Episode 1`, `Episode 2`, `Episode 10`).
+- 🎬 **Multi-Type Media Library**:
+  - Video (`.mp4, .mkv, .avi, .mov, .webm, .ts, .m2ts`, etc.)
+  - Audio (`.mp3, .m4a, .flac, .wav, .wma, .aac, .ogg`) with cover artwork
+  - Photos (`.jpg, .jpeg, .png, .webp`) with image gallery viewer
+- 🔖 **Webmarks / Stream Bookmarks**:
+  - Save and stream direct video feeds, HLS (`.m3u8`), and YouTube videos via native MSX YouTube plugin.
+- 🌌 **Video Wallpaper (Atmos)**:
+  - Atmospheric background video loops (Atmos 1–6) powered by MSX background plugin.
+- ⏯️ **Playback Resume & Extended Controls**:
+  - Integrated `resume:key: "url"` for cross-session playback memory on TV.
+  - Extended on-screen controls, scrubber, and audio track selectors.
+- 🖥️ **Web Dashboard**:
+  - Browser dashboard at `http://<IP>:5208` for service monitoring, system status, and adding webmarks.
 
 ---
 
