@@ -7,9 +7,10 @@ public sealed class MediaSettings
     public string DownloadPath { get; set; } = "/home/roboter/Downloads";
 
     /// <summary>
-    /// Address of TorrServer instance (e.g. "http://localhost:8090" or "192.168.1.100:8090")
+    /// Address of TorrServer instance (e.g. "http://localhost:8090" or "192.168.1.100:8090").
+    /// Defaults to empty (disabled) so it does not attempt connection when TorrServer is not running.
     /// </summary>
-    public string TorrServer { get; set; } = "http://localhost:8090";
+    public string TorrServer { get; set; } = string.Empty;
 
     /// <summary>
     /// Supported video file extensions

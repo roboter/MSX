@@ -6,12 +6,23 @@ namespace MSX;
 
 public sealed class TorrServerService
 {
-    private readonly HttpClient _httpClient;
-
-    public TorrServerService(HttpClient httpClient)
+    private static readonly HttpClient SharedHttpClient = new(new SocketsHttpHandler
     {
-        _httpClient = httpClient;
-        _httpClient.Timeout = TimeSpan.FromSeconds(10);
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        ConnectTimeout = TimeSpan.FromSeconds(2)
+    })
+    {
+        Timeout = TimeSpan.FromSeconds(5)
+    };
+
+    private readonly HttpClient _httpClient;
+    private string? _cachedVersion;
+    private DateTime _lastCheckTime = DateTime.MinValue;
+    private readonly TimeSpan _cacheDuration = TimeSpan.FromSeconds(30);
+
+    public TorrServerService(HttpClient? httpClient = null)
+    {
+        _httpClient = httpClient ?? SharedHttpClient;
     }
 
     public static string NormalizeHost(string host)
@@ -26,17 +37,30 @@ public sealed class TorrServerService
         return trimmed.TrimEnd('/');
     }
 
-    public async Task<string?> CheckTorrServerAsync(string? torrHost, CancellationToken ct = default)
+    public async Task<string?> CheckTorrServerAsync(string? torrHost, bool forceRefresh = false, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(torrHost)) return null;
+
+        var now = DateTime.UtcNow;
+        if (!forceRefresh && (now - _lastCheckTime) < _cacheDuration)
+        {
+            return _cachedVersion;
+        }
+
         var baseUri = NormalizeHost(torrHost);
         try
         {
-            var res = await _httpClient.GetStringAsync($"{baseUri}/echo", ct);
-            return res.Trim();
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(1));
+            var res = await _httpClient.GetStringAsync($"{baseUri}/echo", cts.Token);
+            _cachedVersion = res.Trim();
+            _lastCheckTime = DateTime.UtcNow;
+            return _cachedVersion;
         }
         catch
         {
+            _cachedVersion = null;
+            _lastCheckTime = DateTime.UtcNow;
             return null;
         }
     }
@@ -55,9 +79,8 @@ public sealed class TorrServerService
             var torrents = await response.Content.ReadFromJsonAsync<List<TorrTorrentItem>>(cancellationToken: ct);
             return torrents ?? [];
         }
-        catch (Exception ex)
+        catch
         {
-            Console.WriteLine($"[TorrServer] Error fetching torrents: {ex.Message}");
             return [];
         }
     }
@@ -72,9 +95,8 @@ public sealed class TorrServerService
             var url = $"{baseUri}/stream/?stat&link={Uri.EscapeDataString(link)}";
             return await _httpClient.GetFromJsonAsync<TorrStreamInfo>(url, ct);
         }
-        catch (Exception ex)
+        catch
         {
-            Console.WriteLine($"[TorrServer] Error fetching stream info for {link}: {ex.Message}");
             return null;
         }
     }
@@ -97,9 +119,8 @@ public sealed class TorrServerService
             var response = await _httpClient.PostAsync($"{baseUri}/torrents", req, ct);
             return response.IsSuccessStatusCode;
         }
-        catch (Exception ex)
+        catch
         {
-            Console.WriteLine($"[TorrServer] Error adding torrent: {ex.Message}");
             return false;
         }
     }
@@ -115,9 +136,8 @@ public sealed class TorrServerService
             var response = await _httpClient.PostAsync($"{baseUri}/torrents", req, ct);
             return response.IsSuccessStatusCode;
         }
-        catch (Exception ex)
+        catch
         {
-            Console.WriteLine($"[TorrServer] Error removing torrent: {ex.Message}");
             return false;
         }
     }
@@ -133,11 +153,9 @@ public sealed class TorrServerService
             var response = await _httpClient.PostAsync($"{baseUri}/torrents", req, ct);
             return response.IsSuccessStatusCode;
         }
-        catch (Exception ex)
+        catch
         {
-            Console.WriteLine($"[TorrServer] Error dropping torrent: {ex.Message}");
             return false;
         }
     }
 }
-

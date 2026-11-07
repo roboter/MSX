@@ -9,11 +9,14 @@ using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Silence verbose HttpClient handler logs
+builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
+builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
+
 // Register settings
 builder.Services.Configure<MediaSettings>(
     builder.Configuration.GetSection(MediaSettings.SectionName));
 
-builder.Services.AddHttpClient<TorrServerService>();
 builder.Services.AddSingleton<TorrServerService>();
 builder.Services.AddSingleton<WebmarksService>();
 
@@ -320,8 +323,27 @@ List<MsxMediaItem> GetDirectoryItems(string targetDir, string scheme, string hos
     // 2. Files: sorted naturally by name
     try
     {
-        var files = Directory.EnumerateFiles(targetDir, "*.*", SearchOption.TopDirectoryOnly)
+        var allFilesInDir = Directory.EnumerateFiles(targetDir, "*.*", SearchOption.TopDirectoryOnly)
             .Where(f => !Path.GetFileName(f).StartsWith('.'))
+            .ToList();
+
+        var videoBaseNames = allFilesInDir
+            .Where(f => videoExtensions.Contains(Path.GetExtension(f)))
+            .Select(f => Path.GetFileNameWithoutExtension(f))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var audioBaseNames = allFilesInDir
+            .Where(f => audioExtensions.Contains(Path.GetExtension(f)))
+            .Select(f => Path.GetFileNameWithoutExtension(f))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var targetDirName = Path.GetFileName(targetDir);
+        var standardCoverNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "cover", "folder", "poster", "default", "background", "fanart", targetDirName
+        };
+
+        var files = allFilesInDir
             .OrderBy(f => Path.GetFileNameWithoutExtension(f), NaturalStringComparer.Instance);
 
         foreach (var file in files)
@@ -374,6 +396,15 @@ List<MsxMediaItem> GetDirectoryItems(string targetDir, string scheme, string hos
             }
             else if (photoExtensions.Contains(ext))
             {
+                // If it is a cover for a video, an audio file, or a folder poster, ignore it as a separate piece
+                if (videoBaseNames.Contains(fileNameWithoutExt) ||
+                    audioBaseNames.Contains(fileNameWithoutExt) ||
+                    standardCoverNames.Contains(fileNameWithoutExt) ||
+                    videoBaseNames.Count > 0)
+                {
+                    continue;
+                }
+
                 var mediaUrl = BuildMediaUrl(file, scheme, host);
                 items.Add(new MsxMediaItem
                 {
