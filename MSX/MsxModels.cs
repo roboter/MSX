@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
 namespace MSX.Models;
 
@@ -27,6 +27,10 @@ public sealed class MsxMenuData
 {
     [JsonPropertyName("type")]
     public string Type { get; set; } = "pages";
+
+    [JsonPropertyName("headline")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Headline { get; set; }
 
     [JsonPropertyName("template")]
     public MsxTemplate Template { get; set; } = new();
@@ -60,6 +64,10 @@ public sealed class MsxMediaItem
 
     [JsonPropertyName("action")]
     public string Action { get; set; } = string.Empty;
+
+    [JsonPropertyName("icon")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Icon { get; set; }
 
     [JsonPropertyName("image")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

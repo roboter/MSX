@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.FileProviders;
 using MSX;
 using MSX.Models;
 using System.Text.Json;
@@ -128,116 +128,295 @@ app.MapGet("/msx/start.json", async (HttpContext context) =>
     return Results.Content(resolved, "application/json");
 });
 
-// 2. Serve the dynamic menu catalog
-app.MapGet("/msx/menu.json", (HttpContext context) =>
+// Filter out .avi if present and match case-insensitively
+var configuredAllowed = mediaConfig.AllowedExtensions?
+    .Where(ext => !ext.Equals(".avi", StringComparison.OrdinalIgnoreCase))
+    .ToArray();
+
+var allowedExtensions = new HashSet<string>(
+    (configuredAllowed != null && configuredAllowed.Length > 0)
+        ? configuredAllowed
+        : [".mp4", ".mkv", ".mov", ".webm"],
+    StringComparer.OrdinalIgnoreCase
+);
+
+// Validate CoverExtensions with fallback
+var coverExtensions = (mediaConfig.CoverExtensions != null && mediaConfig.CoverExtensions.Length > 0)
+    ? mediaConfig.CoverExtensions
+    : [".jpg", ".jpeg", ".png", ".webp"];
+
+var jsonOptions = new JsonSerializerOptions
 {
-    var scheme = context.Request.Scheme;
-    var host = context.Request.Host.Value;
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    WriteIndented = true
+};
 
-    // Filter out .avi if present and match case-insensitively
-    var configuredAllowed = mediaConfig.AllowedExtensions?
-        .Where(ext => !ext.Equals(".avi", StringComparison.OrdinalIgnoreCase))
-        .ToArray();
-
-    var allowedExtensions = new HashSet<string>(
-        (configuredAllowed != null && configuredAllowed.Length > 0)
-            ? configuredAllowed
-            : [".mp4", ".mkv", ".mov", ".webm"],
-        StringComparer.OrdinalIgnoreCase
-    );
-
-    // Validate CoverExtensions with fallback
-    var coverExtensions = (mediaConfig.CoverExtensions != null && mediaConfig.CoverExtensions.Length > 0)
-        ? mediaConfig.CoverExtensions
-        : [".jpg", ".jpeg", ".png", ".webp"];
-
-    // Helper: Build safe, slash-preserving media URLs
-    string BuildMediaUrl(string fullFilePath)
+// Helper: Safely resolve relative path to absolute directory within downloadsFolder
+string? ResolveTargetDir(string? subPath)
+{
+    if (string.IsNullOrWhiteSpace(subPath))
     {
-        var relative = Path.GetRelativePath(downloadsFolder, fullFilePath).Replace('\\', '/');
-        var safeUrlPath = string.Join("/", relative.Split('/').Select(Uri.EscapeDataString));
-        return $"{scheme}://{host}/media/{safeUrlPath}";
+        return downloadsFolder;
     }
 
-    // Helper: Discover matching file-level cover art (VideoName.ext -> VideoName.jpg)
-    string? FindCoverUrl(string videoFilePath)
+    var normalized = subPath.Trim().Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+    var combined = Path.GetFullPath(Path.Combine(downloadsFolder, normalized));
+    var fullDownloads = Path.GetFullPath(downloadsFolder);
+
+    if (!combined.StartsWith(fullDownloads, StringComparison.OrdinalIgnoreCase))
     {
-        var directory = Path.GetDirectoryName(videoFilePath);
-        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
-            return null;
-
-        var videoBaseName = Path.GetFileNameWithoutExtension(videoFilePath);
-
-        foreach (var ext in coverExtensions)
-        {
-            var candidate = Path.Combine(directory, videoBaseName + ext);
-            if (File.Exists(candidate))
-            {
-                return BuildMediaUrl(candidate);
-            }
-        }
-
         return null;
     }
 
-    var videoItems = new List<MsxMediaItem>();
+    return combined;
+}
 
-    if (Directory.Exists(downloadsFolder))
+// Helper: Build safe, slash-preserving media URLs
+string BuildMediaUrl(string fullFilePath, string scheme, string host)
+{
+    var relative = Path.GetRelativePath(downloadsFolder, fullFilePath).Replace('\\', '/');
+    var safeUrlPath = string.Join("/", relative.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString));
+    return $"{scheme}://{host}/media/{safeUrlPath}";
+}
+
+// Helper: Build safe, slash-preserving folder content URLs
+string BuildContentUrl(string relativePath, string scheme, string host)
+{
+    var relative = relativePath.Replace('\\', '/');
+    var safeUrlPath = string.Join("/", relative.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString));
+    return $"{scheme}://{host}/msx/content.json?path={safeUrlPath}";
+}
+
+// Helper: Discover matching file-level cover art (VideoName.ext -> VideoName.jpg)
+string? FindCoverUrl(string videoFilePath, string scheme, string host)
+{
+    var directory = Path.GetDirectoryName(videoFilePath);
+    if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+        return null;
+
+    var videoBaseName = Path.GetFileNameWithoutExtension(videoFilePath);
+
+    foreach (var ext in coverExtensions)
     {
-        var files = Directory.EnumerateFiles(downloadsFolder, "*.*", SearchOption.AllDirectories)
-            .Where(f => allowedExtensions.Contains(Path.GetExtension(f)))
-            .OrderByDescending(File.GetLastWriteTimeUtc);
-
-        foreach (var file in files)
+        var candidate = Path.Combine(directory, videoBaseName + ext);
+        if (File.Exists(candidate))
         {
-            var directoryPath = Path.GetDirectoryName(file);
-            var parentFolder = string.IsNullOrEmpty(directoryPath) ? null : Path.GetFileName(directoryPath);
-            var fileNameWithoutExt = Path.GetFileNameWithoutExtension(file);
-
-            var title = string.IsNullOrEmpty(parentFolder) || parentFolder.Equals(Path.GetFileName(downloadsFolder), StringComparison.OrdinalIgnoreCase)
-                ? fileNameWithoutExt
-                : $"{parentFolder} - {fileNameWithoutExt}";
-
-            videoItems.Add(new MsxMediaItem
-            {
-                Title = title,
-                Action = $"video:{BuildMediaUrl(file)}",
-                Image = FindCoverUrl(file)
-            });
+            return BuildMediaUrl(candidate, scheme, host);
         }
     }
 
+    return null;
+}
+
+// Helper: Discover matching folder-level cover art
+string? FindFolderCoverUrl(string folderPath, string scheme, string host)
+{
+    if (string.IsNullOrEmpty(folderPath) || !Directory.Exists(folderPath))
+        return null;
+
+    var folderName = Path.GetFileName(folderPath);
+
+    // 1. Check for standard cover names or folder name
+    var candidateNames = new[] { "folder", "poster", "cover", "default", folderName };
+    foreach (var name in candidateNames)
+    {
+        foreach (var ext in coverExtensions)
+        {
+            var candidate = Path.Combine(folderPath, name + ext);
+            if (File.Exists(candidate))
+            {
+                return BuildMediaUrl(candidate, scheme, host);
+            }
+        }
+    }
+
+    // 2. Check for any image file directly in the folder
+    try
+    {
+        var anyImage = Directory.EnumerateFiles(folderPath, "*.*", SearchOption.TopDirectoryOnly)
+            .FirstOrDefault(f => coverExtensions.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase));
+        if (anyImage != null)
+        {
+            return BuildMediaUrl(anyImage, scheme, host);
+        }
+    }
+    catch { }
+
+    // 3. Fallback: check if the first video in the folder has a matching cover
+    try
+    {
+        var firstVideo = Directory.EnumerateFiles(folderPath, "*.*", SearchOption.TopDirectoryOnly)
+            .FirstOrDefault(f => allowedExtensions.Contains(Path.GetExtension(f)));
+        if (firstVideo != null)
+        {
+            var videoCover = FindCoverUrl(firstVideo, scheme, host);
+            if (videoCover != null)
+            {
+                return videoCover;
+            }
+        }
+    }
+    catch { }
+
+    return null;
+}
+
+// Helper: Check if directory contains any allowed media files (directly or nested)
+bool HasMediaFiles(string dirPath)
+{
+    try
+    {
+        return Directory.EnumerateFiles(dirPath, "*.*", SearchOption.AllDirectories)
+            .Any(f => allowedExtensions.Contains(Path.GetExtension(f)));
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+// Helper: Get folder and file items for a directory, keeping folders as folders and sorting files by name
+List<MsxMediaItem> GetDirectoryItems(string targetDir, string scheme, string host)
+{
+    var items = new List<MsxMediaItem>();
+
+    if (!Directory.Exists(targetDir))
+        return items;
+
+    // 1. Folders: stay folders, sorted naturally by name
+    try
+    {
+        var subDirs = Directory.EnumerateDirectories(targetDir, "*", SearchOption.TopDirectoryOnly)
+            .Where(d => !Path.GetFileName(d).StartsWith('.') && HasMediaFiles(d))
+            .OrderBy(d => Path.GetFileName(d), NaturalStringComparer.Instance);
+
+        foreach (var dir in subDirs)
+        {
+            var dirName = Path.GetFileName(dir);
+            var relPath = Path.GetRelativePath(downloadsFolder, dir);
+
+            items.Add(new MsxMediaItem
+            {
+                Title = dirName,
+                Icon = "msx-white-soft:folder",
+                Action = $"content:{BuildContentUrl(relPath, scheme, host)}",
+                Image = FindFolderCoverUrl(dir, scheme, host)
+            });
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Storage] Error enumerating directories in {targetDir}: {ex.Message}");
+    }
+
+    // 2. Files: sorted naturally by name
+    try
+    {
+        var files = Directory.EnumerateFiles(targetDir, "*.*", SearchOption.TopDirectoryOnly)
+            .Where(f => !Path.GetFileName(f).StartsWith('.') && allowedExtensions.Contains(Path.GetExtension(f)))
+            .OrderBy(f => Path.GetFileNameWithoutExtension(f), NaturalStringComparer.Instance);
+
+        foreach (var file in files)
+        {
+            var fileNameWithoutExt = Path.GetFileNameWithoutExtension(file);
+
+            items.Add(new MsxMediaItem
+            {
+                Title = fileNameWithoutExt,
+                Action = $"video:{BuildMediaUrl(file, scheme, host)}",
+                Image = FindCoverUrl(file, scheme, host)
+            });
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Storage] Error enumerating files in {targetDir}: {ex.Message}");
+    }
+
+    return items;
+}
+
+MsxMenuData BuildMenuData(string targetDir, string scheme, string host)
+{
+    var isRoot = targetDir.Equals(downloadsFolder, StringComparison.OrdinalIgnoreCase);
+    return new MsxMenuData
+    {
+        Type = "pages",
+        Headline = isRoot ? null : Path.GetFileName(targetDir),
+        Template = new MsxTemplate
+        {
+            Type = "separate",
+            Layout = "0,0,2,4",
+            Icon = "msx-white-soft:movie",
+            Color = "msx-glass",
+            ImageFiller = "cover"
+        },
+        Items = GetDirectoryItems(targetDir, scheme, host)
+    };
+}
+
+// 2. Serve the dynamic menu catalog
+app.MapGet("/msx/menu.json", (HttpContext context, string? path) =>
+{
+    var scheme = context.Request.Scheme;
+    var host = context.Request.Host.Value ?? "localhost";
+
+    var targetDir = ResolveTargetDir(path);
+    if (targetDir == null || !Directory.Exists(targetDir))
+    {
+        return Results.NotFound();
+    }
+
+    var isRoot = targetDir.Equals(downloadsFolder, StringComparison.OrdinalIgnoreCase);
+    var headline = isRoot ? "TorrentBot Media Library" : Path.GetFileName(targetDir);
+    var label = isRoot ? "Videos" : Path.GetFileName(targetDir);
+
     var msxCatalog = new MsxRoot
     {
-        Headline = "TorrentBot Media Library",
+        Headline = headline,
         Menu = new List<MsxMenuItem>
         {
             new()
             {
                 Icon = "movie",
-                Label = "Videos",
-                Data = new MsxMenuData
-                {
-                    Type = "pages",
-                    Template = new MsxTemplate
-                    {
-                        Type = "separate",
-                        Layout = "0,0,2,4",
-                        Icon = "msx-white-soft:movie",
-                        Color = "msx-glass",
-                        ImageFiller = "cover"
-                    },
-                    Items = videoItems
-                }
+                Label = label,
+                Data = BuildMenuData(targetDir, scheme, host)
             }
         }
     };
 
-    return Results.Json(msxCatalog, new JsonSerializerOptions
+    return Results.Json(msxCatalog, jsonOptions);
+});
+
+// 3. Serve folder content page for navigation into subdirectories
+app.MapGet("/msx/content.json", (HttpContext context, string? path) =>
+{
+    var scheme = context.Request.Scheme;
+    var host = context.Request.Host.Value ?? "localhost";
+
+    var targetDir = ResolveTargetDir(path);
+    if (targetDir == null || !Directory.Exists(targetDir))
     {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        WriteIndented = true
-    });
+        return Results.NotFound();
+    }
+
+    var menuData = BuildMenuData(targetDir, scheme, host);
+    return Results.Json(menuData, jsonOptions);
+});
+
+app.MapGet("/msx/content", (HttpContext context, string? path) =>
+{
+    var scheme = context.Request.Scheme;
+    var host = context.Request.Host.Value ?? "localhost";
+
+    var targetDir = ResolveTargetDir(path);
+    if (targetDir == null || !Directory.Exists(targetDir))
+    {
+        return Results.NotFound();
+    }
+
+    var menuData = BuildMenuData(targetDir, scheme, host);
+    return Results.Json(menuData, jsonOptions);
 });
 
 await app.RunAsync();
