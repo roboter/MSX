@@ -92,6 +92,13 @@ app.UseStaticFiles(new StaticFileOptions
     ServeUnknownFileTypes = true // Permits .mkv, .ts, .m2ts, .torrent, etc.
 });
 
+// Run automatic cover extraction in background on app launch
+_ = Task.Run(async () =>
+{
+    await Task.Delay(1500); // Wait briefly for server startup
+    await coverExtractorService.ScanAndExtractAllAsync(downloadsFolder);
+});
+
 // File extensions setup
 var videoExtensions = new HashSet<string>(
     mediaConfig.AllowedExtensions ?? [".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".mts", ".m2ts", ".wmv", ".flv", ".mpg", ".mpeg", ".m4v"],
@@ -619,6 +626,14 @@ app.MapGet("/", async (HttpContext context) =>
             </div>
 
             <div class="card">
+                <h2>🎨 Cover Art Extraction</h2>
+                <p style="color: var(--muted); margin-top: 0">Automatic extraction runs on app launch using online metadata (TVMaze/TMDB) and local FFmpeg embedded stream extraction.</p>
+                <form method="POST" action="/covers/scan">
+                    <button type="submit" class="btn">⚡ Scan & Extract Missing Covers Now</button>
+                </form>
+            </div>
+
+            <div class="card">
                 <h2>🔖 Add Webmark Stream / YouTube</h2>
                 <form method="POST" action="/webmarks/add">
                     <div class="form-group">
@@ -634,6 +649,13 @@ app.MapGet("/", async (HttpContext context) =>
     """;
 
     return Results.Content(html, "text/html");
+});
+
+// Endpoint to trigger manual cover scan from browser
+app.MapPost("/covers/scan", (HttpContext context) =>
+{
+    _ = Task.Run(() => coverExtractorService.ScanAndExtractAllAsync(downloadsFolder));
+    return Results.Redirect("/");
 });
 
 // Quick endpoint to add webmarks via browser
