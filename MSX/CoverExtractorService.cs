@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace MSX;
 
@@ -12,7 +13,8 @@ public sealed class CoverExtractorService
         ConnectTimeout = TimeSpan.FromSeconds(3)
     })
     {
-        Timeout = TimeSpan.FromSeconds(10)
+        Timeout = TimeSpan.FromSeconds(10),
+        DefaultRequestHeaders = { { "User-Agent", "ServeMSX/2.0 (MediaStationX Server; +https://github.com/damiva/ServeMSX)" } }
     };
 
     private readonly HttpClient _httpClient;
@@ -55,11 +57,52 @@ public sealed class CoverExtractorService
         }
     }
 
-    public async Task<bool> ExtractCoverWithFFmpegAsync(string videoPath, string targetJpgPath, CancellationToken ct = default)
+    public static bool IsTitleMatch(string expectedTitle, string candidateTitle)
+    {
+        if (string.IsNullOrWhiteSpace(expectedTitle) || string.IsNullOrWhiteSpace(candidateTitle))
+            return false;
+
+        var expNorm = NormalizeForComparison(expectedTitle);
+        var candNorm = NormalizeForComparison(candidateTitle);
+
+        if (expNorm == candNorm)
+            return true;
+
+        var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "the", "a", "an", "and", "of", "in", "to", "for", "film", "series" };
+        var expWords = expNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => !stopWords.Contains(w))
+            .ToList();
+
+        if (expWords.Count == 0)
+        {
+            return expNorm.Length >= 2 && candNorm.Equals(expNorm, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var candWords = candNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        int matched = expWords.Count(w => candWords.Contains(w));
+
+        // For single distinctive word (e.g. "Mutiny", "Wednesday"), that word must be present
+        if (expWords.Count == 1)
+        {
+            return candWords.Contains(expWords[0]);
+        }
+
+        // For multi-word titles (e.g. "The Shrinking Man"), require at least 60% of distinctive words
+        return (double)matched / expWords.Count >= 0.6;
+    }
+
+    private static string NormalizeForComparison(string input)
+    {
+        var cleaned = Regex.Replace(input, @"[^\p{L}\p{Nd}\s]", " ");
+        return Regex.Replace(cleaned, @"\s+", " ").Trim().ToLowerInvariant();
+    }
+
+    public async Task<bool> ExtractEmbeddedCoverWithFFmpegAsync(string videoPath, string targetJpgPath, CancellationToken ct = default)
     {
         if (!CheckFFmpegAvailable()) return false;
 
-        // 1. Try extracting embedded cover art stream (mimetype: image/jpeg)
+        // 1. Embedded cover art stream (mimetype: image/jpeg)
         try
         {
             using var proc = Process.Start(new ProcessStartInfo
@@ -82,7 +125,7 @@ public sealed class CoverExtractorService
         }
         catch { }
 
-        // 2. Try extracting attached picture (common in MKV/MP4 files)
+        // 2. Attached picture stream (common in MKV/MP4 files)
         try
         {
             using var proc = Process.Start(new ProcessStartInfo
@@ -105,7 +148,14 @@ public sealed class CoverExtractorService
         }
         catch { }
 
-        // 3. Fallback: Extract video thumbnail frame at 00:03:00
+        return false;
+    }
+
+    public async Task<bool> ExtractFrameWithFFmpegAsync(string videoPath, string targetJpgPath, CancellationToken ct = default)
+    {
+        if (!CheckFFmpegAvailable()) return false;
+
+        // Extract video thumbnail frame at 00:03:00
         try
         {
             using var proc = Process.Start(new ProcessStartInfo
@@ -128,7 +178,7 @@ public sealed class CoverExtractorService
         }
         catch { }
 
-        // 4. Fallback: Try at 30 seconds for short videos
+        // Fallback: 30 seconds for short videos
         try
         {
             using var proc = Process.Start(new ProcessStartInfo
@@ -154,71 +204,129 @@ public sealed class CoverExtractorService
         return false;
     }
 
-    public async Task<string?> FindOnlinePosterUrlAsync(string rawFileName, CancellationToken ct = default)
+    public async Task<string?> QueryTvMazePosterAsync(string title, CancellationToken ct = default)
     {
-        var parsed = MovieTitleParser.Parse(rawFileName);
-        if (string.IsNullOrWhiteSpace(parsed.Title)) return null;
+        try
+        {
+            var tvUrl = $"https://api.tvmaze.com/singlesearch/shows?q={Uri.EscapeDataString(title)}";
+            using var res = await _httpClient.GetAsync(tvUrl, ct);
+            if (!res.IsSuccessStatusCode) return null;
 
-        // 1. If TV show or has season info: Query TVMaze (Free, no key required)
-        if (parsed.IsTv || parsed.Season.HasValue)
+            using var doc = await JsonDocument.ParseAsync(await res.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+
+            // Validate returned name to prevent false matches (e.g. "The" matching "The Witcher")
+            var showName = doc.RootElement.TryGetProperty("name", out var nElem) ? nElem.GetString() : null;
+            if (string.IsNullOrEmpty(showName) || !IsTitleMatch(title, showName))
+            {
+                return null;
+            }
+
+            if (doc.RootElement.TryGetProperty("image", out var imgElem) && imgElem.ValueKind == JsonValueKind.Object)
+            {
+                if (imgElem.TryGetProperty("original", out var origElem) && origElem.GetString() is { } orig)
+                    return orig;
+                if (imgElem.TryGetProperty("medium", out var medElem) && medElem.GetString() is { } med)
+                    return med;
+            }
+        }
+        catch { }
+
+        return null;
+    }
+
+    public async Task<string?> QueryWikipediaPosterAsync(string title, int? year, bool isTv, CancellationToken ct = default)
+    {
+        var candidates = new List<string>();
+        var cleanTitle = title.Replace(" ", "_");
+
+        if (year.HasValue)
+        {
+            if (isTv)
+            {
+                candidates.Add($"{cleanTitle}_({year.Value}_TV_series)");
+            }
+            else
+            {
+                candidates.Add($"{cleanTitle}_({year.Value}_film)");
+            }
+        }
+
+        if (isTv)
+        {
+            candidates.Add($"{cleanTitle}_(TV_series)");
+        }
+        else
+        {
+            candidates.Add($"{cleanTitle}_(film)");
+        }
+
+        candidates.Add(cleanTitle);
+
+        foreach (var candidate in candidates)
         {
             try
             {
-                var tvUrl = $"https://api.tvmaze.com/singlesearch/shows?q={Uri.EscapeDataString(parsed.Title)}";
-                using var res = await _httpClient.GetAsync(tvUrl, ct);
-                if (res.IsSuccessStatusCode)
+                var url = $"https://en.wikipedia.org/api/rest_v1/page/summary/{Uri.EscapeDataString(candidate)}";
+                using var res = await _httpClient.GetAsync(url, ct);
+                if (!res.IsSuccessStatusCode) continue;
+
+                using var doc = await JsonDocument.ParseAsync(await res.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object) continue;
+
+                var resTitle = root.TryGetProperty("title", out var tProp) ? tProp.GetString() : null;
+                if (string.IsNullOrEmpty(resTitle) || !IsTitleMatch(title, resTitle))
                 {
-                    using var doc = await JsonDocument.ParseAsync(await res.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-                    if (doc.RootElement.TryGetProperty("image", out var imgElem))
-                    {
-                        if (imgElem.TryGetProperty("original", out var origElem) && origElem.GetString() is { } orig)
-                            return orig;
-                        if (imgElem.TryGetProperty("medium", out var medElem) && medElem.GetString() is { } med)
-                            return med;
-                    }
+                    continue;
+                }
+
+                if (root.TryGetProperty("originalimage", out var origElem) &&
+                    origElem.TryGetProperty("source", out var srcElem) &&
+                    srcElem.GetString() is { } src && !string.IsNullOrEmpty(src))
+                {
+                    return src;
+                }
+
+                if (root.TryGetProperty("thumbnail", out var thumbElem) &&
+                    thumbElem.TryGetProperty("source", out var thumbSrc) &&
+                    thumbSrc.GetString() is { } tSrc && !string.IsNullOrEmpty(tSrc))
+                {
+                    return tSrc;
                 }
             }
             catch { }
         }
 
-        // 2. Query TMDB if key is provided
-        if (!string.IsNullOrWhiteSpace(_mediaSettings.TmdbApiKey))
+        return null;
+    }
+
+    public async Task<string?> QueryTmdbPosterAsync(string title, int? year, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(_mediaSettings.TmdbApiKey)) return null;
+
+        try
         {
-            try
+            var yearParam = year.HasValue ? $"&year={year.Value}" : "";
+            var tmdbUrl = $"https://api.themoviedb.org/3/search/multi?query={Uri.EscapeDataString(title)}{yearParam}&api_key={_mediaSettings.TmdbApiKey}&language=ru-RU";
+            using var res = await _httpClient.GetAsync(tmdbUrl, ct);
+            if (!res.IsSuccessStatusCode) return null;
+
+            using var doc = await JsonDocument.ParseAsync(await res.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            if (doc.RootElement.TryGetProperty("results", out var results) && results.GetArrayLength() > 0)
             {
-                var yearParam = parsed.Year.HasValue ? $"&year={parsed.Year.Value}" : "";
-                var tmdbUrl = $"https://api.themoviedb.org/3/search/multi?query={Uri.EscapeDataString(parsed.Title)}{yearParam}&api_key={_mediaSettings.TmdbApiKey}&language=ru-RU";
-                using var res = await _httpClient.GetAsync(tmdbUrl, ct);
-                if (res.IsSuccessStatusCode)
+                foreach (var item in results.EnumerateArray())
                 {
-                    using var doc = await JsonDocument.ParseAsync(await res.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-                    if (doc.RootElement.TryGetProperty("results", out var results) && results.GetArrayLength() > 0)
+                    var itemTitle = item.TryGetProperty("title", out var t) ? t.GetString() :
+                                    item.TryGetProperty("name", out var n) ? n.GetString() : null;
+
+                    if (!string.IsNullOrEmpty(itemTitle) && IsTitleMatch(title, itemTitle))
                     {
-                        var first = results[0];
-                        if (first.TryGetProperty("poster_path", out var pPath) && pPath.GetString() is { } p && !string.IsNullOrEmpty(p))
+                        if (item.TryGetProperty("poster_path", out var pPath) && pPath.GetString() is { } p && !string.IsNullOrEmpty(p))
                         {
                             return $"https://image.tmdb.org/t/p/w500{p}";
                         }
                     }
-                }
-            }
-            catch { }
-        }
-
-        // 3. Fallback: Query TVMaze for shows or movies with show counterparts
-        try
-        {
-            var tvUrl = $"https://api.tvmaze.com/singlesearch/shows?q={Uri.EscapeDataString(parsed.Title)}";
-            using var res = await _httpClient.GetAsync(tvUrl, ct);
-            if (res.IsSuccessStatusCode)
-            {
-                using var doc = await JsonDocument.ParseAsync(await res.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-                if (doc.RootElement.TryGetProperty("image", out var imgElem))
-                {
-                    if (imgElem.TryGetProperty("original", out var origElem) && origElem.GetString() is { } orig)
-                        return orig;
-                    if (imgElem.TryGetProperty("medium", out var medElem) && medElem.GetString() is { } med)
-                        return med;
                 }
             }
         }
@@ -227,7 +335,37 @@ public sealed class CoverExtractorService
         return null;
     }
 
-    public async Task<bool> EnsureCoverAsync(string videoFilePath, CancellationToken ct = default)
+    public async Task<string?> FindOnlinePosterUrlAsync(string rawFileName, CancellationToken ct = default)
+    {
+        var parsed = MovieTitleParser.Parse(rawFileName);
+        if (string.IsNullOrWhiteSpace(parsed.Title) || parsed.Title.Length < 2) return null;
+
+        // 1. If TV series: try TVMaze first
+        if (parsed.IsTv || parsed.Season.HasValue)
+        {
+            var tvResult = await QueryTvMazePosterAsync(parsed.Title, ct);
+            if (!string.IsNullOrEmpty(tvResult)) return tvResult;
+        }
+
+        // 2. Try TMDB if API key is provided
+        var tmdbResult = await QueryTmdbPosterAsync(parsed.Title, parsed.Year, ct);
+        if (!string.IsNullOrEmpty(tmdbResult)) return tmdbResult;
+
+        // 3. Try Wikipedia (high-res official posters for movies & shows, zero key required)
+        var wikiResult = await QueryWikipediaPosterAsync(parsed.Title, parsed.Year, parsed.IsTv, ct);
+        if (!string.IsNullOrEmpty(wikiResult)) return wikiResult;
+
+        // 4. Fallback: TVMaze for shows without season indicators in filename
+        if (!parsed.IsTv)
+        {
+            var tvFallback = await QueryTvMazePosterAsync(parsed.Title, ct);
+            if (!string.IsNullOrEmpty(tvFallback)) return tvFallback;
+        }
+
+        return null;
+    }
+
+    public async Task<bool> EnsureCoverAsync(string videoFilePath, bool overwrite = false, CancellationToken ct = default)
     {
         var dir = Path.GetDirectoryName(videoFilePath);
         if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
@@ -235,23 +373,38 @@ public sealed class CoverExtractorService
         var baseName = Path.GetFileNameWithoutExtension(videoFilePath);
         var targetJpg = Path.Combine(dir, baseName + ".jpg");
 
-        // Already has cover
-        if (File.Exists(targetJpg) && new FileInfo(targetJpg).Length > 1000)
+        // If not forcing overwrite, check if valid cover already exists
+        if (!overwrite)
         {
-            return true;
+            if (File.Exists(targetJpg) && new FileInfo(targetJpg).Length > 1000)
+            {
+                return true;
+            }
+
+            foreach (var ext in new[] { ".png", ".jpeg", ".webp" })
+            {
+                var existing = Path.Combine(dir, baseName + ext);
+                if (File.Exists(existing) && new FileInfo(existing).Length > 1000)
+                {
+                    return true;
+                }
+            }
         }
 
-        // Check if other image extensions exist
-        foreach (var ext in new[] { ".png", ".jpeg", ".webp" })
+        // 1. Try embedded cover stream directly from video file (100% genuine release art, zero network)
+        if (CheckFFmpegAvailable())
         {
-            var existing = Path.Combine(dir, baseName + ext);
-            if (File.Exists(existing) && new FileInfo(existing).Length > 1000)
+            var hasEmbedded = await ExtractEmbeddedCoverWithFFmpegAsync(videoFilePath, targetJpg, ct);
+            if (hasEmbedded)
             {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine($"[CoverExtractor] Extracted embedded cover for '{baseName}'");
+                Console.ResetColor();
                 return true;
             }
         }
 
-        // 1. Try online search first (for official high-res posters)
+        // 2. Try online poster search (Wikipedia / TMDB / TVMaze with strict title validation)
         try
         {
             var posterUrl = await FindOnlinePosterUrlAsync(baseName, ct);
@@ -270,14 +423,14 @@ public sealed class CoverExtractorService
         }
         catch { }
 
-        // 2. Try FFmpeg extraction (embedded cover or crisp video frame)
+        // 3. Fallback: FFmpeg video frame snapshot at 00:03:00
         if (CheckFFmpegAvailable())
         {
-            var extracted = await ExtractCoverWithFFmpegAsync(videoFilePath, targetJpg, ct);
-            if (extracted)
+            var frameExtracted = await ExtractFrameWithFFmpegAsync(videoFilePath, targetJpg, ct);
+            if (frameExtracted)
             {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine($"[CoverExtractor] Extracted FFmpeg cover for '{baseName}'");
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"[CoverExtractor] Extracted video frame snapshot for '{baseName}'");
                 Console.ResetColor();
                 return true;
             }
@@ -286,20 +439,23 @@ public sealed class CoverExtractorService
         return false;
     }
 
-    public async Task EnsureFolderCoverAsync(string folderPath, CancellationToken ct = default)
+    public async Task EnsureFolderCoverAsync(string folderPath, bool overwrite = false, CancellationToken ct = default)
     {
         var posterFile = Path.Combine(folderPath, "folder.jpg");
-        if (File.Exists(posterFile) && new FileInfo(posterFile).Length > 1000) return;
-
-        foreach (var name in new[] { "cover.jpg", "poster.jpg", Path.GetFileName(folderPath) + ".jpg" })
+        if (!overwrite)
         {
-            var p = Path.Combine(folderPath, name);
-            if (File.Exists(p) && new FileInfo(p).Length > 1000) return;
+            if (File.Exists(posterFile) && new FileInfo(posterFile).Length > 1000) return;
+
+            foreach (var name in new[] { "cover.jpg", "poster.jpg", Path.GetFileName(folderPath) + ".jpg" })
+            {
+                var p = Path.Combine(folderPath, name);
+                if (File.Exists(p) && new FileInfo(p).Length > 1000) return;
+            }
         }
 
         var folderName = Path.GetFileName(folderPath);
 
-        // Try online search for the folder name
+        // Try online search for folder name
         try
         {
             var posterUrl = await FindOnlinePosterUrlAsync(folderName, ct);
@@ -337,12 +493,12 @@ public sealed class CoverExtractorService
         catch { }
     }
 
-    public async Task ScanAndExtractAllAsync(string downloadsFolder, CancellationToken ct = default)
+    public async Task ScanAndExtractAllAsync(string downloadsFolder, bool overwrite = false, CancellationToken ct = default)
     {
         if (!Directory.Exists(downloadsFolder)) return;
 
         Console.ForegroundColor = ConsoleColor.Magenta;
-        Console.WriteLine($"[CoverExtractor] Auto-scan started for: {downloadsFolder}");
+        Console.WriteLine($"[CoverExtractor] Auto-scan started for: {downloadsFolder} (force: {overwrite})");
         Console.ResetColor();
 
         try
@@ -355,7 +511,7 @@ public sealed class CoverExtractorService
             foreach (var dir in directories)
             {
                 if (ct.IsCancellationRequested) break;
-                await EnsureFolderCoverAsync(dir, ct);
+                await EnsureFolderCoverAsync(dir, overwrite, ct);
             }
 
             // 2. Scan video files for covers
@@ -368,7 +524,7 @@ public sealed class CoverExtractorService
             foreach (var file in files)
             {
                 if (ct.IsCancellationRequested) break;
-                var created = await EnsureCoverAsync(file, ct);
+                var created = await EnsureCoverAsync(file, overwrite, ct);
                 if (created) count++;
             }
 

@@ -6,6 +6,13 @@ public record ParsedMediaInfo(string Title, int? Year, int? Season, bool IsTv);
 
 public static class MovieTitleParser
 {
+    private static readonly HashSet<string> KnownExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mkv", ".mp4", ".avi", ".mov", ".webm", ".ts", ".mts", ".m2ts",
+        ".wmv", ".flv", ".mpg", ".mpeg", ".m4v", ".torrent",
+        ".jpg", ".jpeg", ".png", ".webp", ".iso"
+    };
+
     private static readonly Regex TrackerPrefixRegex = new(
         @"^\[(?:new-rutor\.org|rutor\.info|rutor\.org|nnmclub\.to|rutracker\.org|kinozal\.tv|torrent)\]\s*",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -24,15 +31,26 @@ public static class MovieTitleParser
 
     public static ParsedMediaInfo Parse(string rawName)
     {
-        // 1. Remove quotes and extensions
+        // 1. Remove quotes and known media/torrent extensions safely
         var name = rawName.Trim('\'', '"', ' ');
-        while (Path.HasExtension(name))
+        while (true)
         {
-            name = Path.GetFileNameWithoutExtension(name);
+            var ext = Path.GetExtension(name);
+            if (!string.IsNullOrEmpty(ext) && KnownExtensions.Contains(ext))
+            {
+                name = Path.GetFileNameWithoutExtension(name);
+            }
+            else
+            {
+                break;
+            }
         }
 
         // 2. Strip tracker prefix like [new-rutor.org]
         name = TrackerPrefixRegex.Replace(name, "").Trim();
+
+        // Normalize underscores to dots so word boundaries match correctly
+        name = name.Replace('_', '.');
 
         int? year = null;
         int? season = null;
